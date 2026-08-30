@@ -1,0 +1,27 @@
+# Environments
+venv/
+env/
+.venv/
+
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging and Dist
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Generated test files
+*.stl
+*.png
+*.jpg
+*.jpeg
+*.json
+!manifest_schema.json
+
+# IDE settings
+.vscode/
+.idea/
