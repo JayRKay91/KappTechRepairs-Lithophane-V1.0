@@ -23,8 +23,8 @@ def _create_filleted_hook_tab(
     num_steps: int = 36,
 ):
     """
-    Generates a solid, watertight filleted eyelet tab with strictly verified outward normals.
-    Anchors deeply into the rim body so slicer boolean engines fuse them into a single volume.
+    Generates a 100% watertight, manifold filleted eyelet solid.
+    All perimeter edges including the base anchor wall are fully closed.
     """
     inner_r = hole_dia / 2.0
     wall_thick = 2.5
@@ -33,7 +33,7 @@ def _create_filleted_hook_tab(
 
     outer_pts = []
 
-    # Upper dome sweep: angle 0 across top (pi/2) to pi
+    # 1. Upper dome sweep: angle 0 across top (pi/2) to pi
     angles_dome = np.linspace(0, np.pi, num_steps // 2)
     for a in angles_dome:
         outer_pts.append([
@@ -41,14 +41,12 @@ def _create_filleted_hook_tab(
             center_y + outer_r * np.sin(a)
         ])
 
-    # Left flare deep into rim
+    # 2. Left flare extending down to anchor
     outer_pts.append([center_x - outer_r - (fillet_flare * 0.4), center_y - (outer_r * 0.4)])
     outer_pts.append([center_x - outer_r - fillet_flare, anchor_y])
 
-    # Base connection inside rim
+    # 3. Right flare coming up from anchor
     outer_pts.append([center_x + outer_r + fillet_flare, anchor_y])
-
-    # Right flare back up from rim
     outer_pts.append([center_x + outer_r + (fillet_flare * 0.4), center_y - (outer_r * 0.4)])
 
     outer_contour = np.array(outer_pts, dtype=np.float32)
@@ -86,13 +84,28 @@ def _create_filleted_hook_tab(
         faces.append([bo_off + i, bo_off + i_next, bi_off + i])
         faces.append([bo_off + i_next, bi_off + i_next, bi_off + i])
 
-        # Inner hole wall (inward cylinder normal pointing toward void)
+        # Inner hole cylinder wall
         faces.append([ti_off + i, bi_off + i, ti_off + i_next])
         faces.append([ti_off + i_next, bi_off + i, bi_off + i_next])
 
-        # Outer filleted wall (outward normal)
+        # Outer filleted wall
         faces.append([to_off + i, to_off + i_next, bo_off + i])
         faces.append([to_off + i_next, bo_off + i_next, bo_off + i])
+
+    # Indices of base anchor endpoints
+    # Left base anchor point is at index (num_steps // 2) + 1
+    # Right base anchor point is at index (num_steps // 2) + 2
+    idx_base_left = (num_steps // 2) + 1
+    idx_base_right = (num_steps // 2) + 2
+
+    # Close base anchor wall across bottom edge
+    p_tl = to_off + idx_base_left
+    p_tr = to_off + idx_base_right
+    p_bl = bo_off + idx_base_left
+    p_br = bo_off + idx_base_right
+
+    faces.append([p_tl, p_tr, p_bl])
+    faces.append([p_tr, p_br, p_bl])
 
     return all_v, np.array(faces, dtype=np.int32)
 
@@ -345,6 +358,5 @@ def _save_stl(v_list, f_list, output_stl_path):
         for j in range(3):
             out_mesh.vectors[i][j] = all_vertices[face[j], :]
     
-    # Recalculate true geometric normals so slicers parse the volume cleanly
     out_mesh.update_normals()
     out_mesh.save(output_stl_path)
