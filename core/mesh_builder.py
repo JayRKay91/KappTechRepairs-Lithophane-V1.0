@@ -14,137 +14,111 @@ def build_lithophane_stl(
         return build_rectangular_litho(manifest, output_stl_path, resolution_mm)
 
 
-def _generate_etsy_hook_contour(
+def _build_watertight_etsy_tab(
     center_x: float,
     center_y: float,
     hole_dia: float,
+    tab_depth: float,
     anchor_y: float,
-    flare_width: float = 4.5,
-    num_steps: int = 40,
+    flare_width: float = 4.0,
+    num_dome_pts: int = 24,
+    num_flare_pts: int = 8,
 ):
     """
-    Constructs an organic Etsy-style keychain tab contour:
-    1. Upper semicircular dome.
-    2. Tangent concave sweeping fillets down into the frame body.
+    Constructs a 100% watertight, manifold 3D solid for the Etsy filleted tab.
+    Built as a strictly closed 2D polygon extrusion to guarantee zero unclosed edges.
     """
     inner_r = hole_dia / 2.0
-    wall_thick = 2.0
+    wall_thick = 2.2
     outer_r = inner_r + wall_thick
 
+    # 1. Outer boundary contour (Looping CCW)
     outer_pts = []
 
-    # 1. Upper dome: sweep from angle 0 (right) across top (pi/2) to pi (left)
-    angles_dome = np.linspace(0, np.pi, num_steps // 2)
+    # 1a. Upper semicircular dome: angle 0 (right) across top (pi/2) to pi (left)
+    angles_dome = np.linspace(0, np.pi, num_dome_pts, endpoint=True)
     for a in angles_dome:
         outer_pts.append([
             center_x + outer_r * np.cos(a),
             center_y + outer_r * np.sin(a),
         ])
 
-    # 2. Left concave flare skirt: smooth easing down to anchor_y
-    n_flare = max(6, num_steps // 4)
-    t_vals = np.linspace(0, 1, n_flare)
-    
-    # Left flare (from -outer_r to -(outer_r + flare_width))
-    for t in t_vals[1:]:
-        # Ease-in-out curve for natural tangent fillet
-        ease = 0.5 * (1 - np.cos(np.pi * t))
-        x = center_x - outer_r - (flare_width * ease)
-        y = center_y - (t * (center_y - anchor_y))
-        outer_pts.append([x, y])
+    # 1b. Left tangent flare curve sweeping down into the border
+    t_vals = np.linspace(0.0, 1.0, num_flare_pts)[1:]
+    for t in t_vals:
+        # Smooth cosine ease for concave flare
+        ease = 0.5 * (1.0 - np.cos(np.pi * t))
+        px = center_x - outer_r - (flare_width * ease)
+        py = center_y - (t * (center_y - anchor_y))
+        outer_pts.append([px, py])
 
-    # 3. Base bottom anchor endpoints inside the rim body
-    outer_pts.append([center_x - outer_r - flare_width, anchor_y - 0.5])
-    outer_pts.append([center_x + outer_r + flare_width, anchor_y - 0.5])
+    # 1c. Bottom flat base anchor line (fused deep inside the border rim)
+    outer_pts.append([center_x + outer_r + flare_width, anchor_y])
 
-    # 4. Right concave flare skirt: smooth easing back up to outer_r
-    for t in reversed(t_vals[1:]):
-        ease = 0.5 * (1 - np.cos(np.pi * t))
-        x = center_x + outer_r + (flare_width * ease)
-        y = center_y - (t * (center_y - anchor_y))
-        outer_pts.append([x, y])
+    # 1d. Right tangent flare curve sweeping back up to angle 0
+    for t in reversed(t_vals[:-1]):
+        ease = 0.5 * (1.0 - np.cos(np.pi * t))
+        px = center_x + outer_r + (flare_width * ease)
+        py = center_y - (t * (center_y - anchor_y))
+        outer_pts.append([px, py])
 
     outer_contour = np.array(outer_pts, dtype=np.float32)
-    num_out = len(outer_contour)
+    N = len(outer_contour)
 
-    # 5. Inner circular hole
-    hole_angles = np.linspace(0, 2 * np.pi, num_out, endpoint=False)
+    # 2. Inner circular hole contour with exact same N points (Looping CCW)
+    hole_angles = np.linspace(0, 2 * np.pi, N, endpoint=False)
     inner_contour = np.column_stack((
         center_x + inner_r * np.cos(hole_angles),
         center_y + inner_r * np.sin(hole_angles),
     ))
 
-    return outer_contour, inner_contour
+    # 3. Assemble 3D vertices:
+    # 0 .. N-1:         Top Outer
+    # N .. 2N-1:        Top Inner
+    # 2N .. 3N-1:       Bot Outer
+    # 3N .. 4N-1:       Bot Inner
+    top_outer = np.column_stack((outer_contour, np.full(N, tab_depth)))
+    top_inner = np.column_stack((inner_contour, np.full(N, tab_depth)))
+    bot_outer = np.column_stack((outer_contour, np.zeros(N)))
+    bot_inner = np.column_stack((inner_contour, np.zeros(N)))
 
-
-def _create_etsy_hook_mesh(
-    center_x: float,
-    center_y: float,
-    hole_dia: float,
-    tab_depth: float,
-    anchor_y: float,
-    flare_width: float = 4.5,
-    num_steps: int = 40,
-):
-    """Generates a fully closed, manifold 3D mesh for the Etsy-style hook tab."""
-    outer_contour, inner_contour = _generate_etsy_hook_contour(
-        center_x, center_y, hole_dia, anchor_y, flare_width, num_steps
-    )
-    num_out = len(outer_contour)
-
-    top_outer = np.column_stack((outer_contour, np.full(num_out, tab_depth)))
-    bot_outer = np.column_stack((outer_contour, np.zeros(num_out)))
-    top_inner = np.column_stack((inner_contour, np.full(num_out, tab_depth)))
-    bot_inner = np.column_stack((inner_contour, np.zeros(num_out)))
-
-    all_v = np.vstack((top_outer, top_inner, bot_outer, bot_inner))
+    vertices = np.vstack((top_outer, top_inner, bot_outer, bot_inner))
     faces = []
 
-    to_off = 0
-    ti_off = num_out
-    bo_off = 2 * num_out
-    bi_off = 3 * num_out
+    to = 0
+    ti = N
+    bo = 2 * N
+    bi = 3 * N
 
-    for i in range(num_out):
-        i_next = (i + 1) % num_out
+    # 4. Triangulate all faces strictly looping around N
+    for i in range(N):
+        i_next = (i + 1) % N
 
-        # Top Annular Face (+Z outward normal)
-        faces.append([to_off + i, ti_off + i, to_off + i_next])
-        faces.append([to_off + i_next, ti_off + i, ti_off + i_next])
+        # Top annular face between outer flare and hole (+Z normal)
+        faces.append([to + i, ti + i, to + i_next])
+        faces.append([to + i_next, ti + i, ti + i_next])
 
-        # Bottom Annular Face (-Z outward normal)
-        faces.append([bo_off + i, bo_off + i_next, bi_off + i])
-        faces.append([bo_off + i_next, bi_off + i_next, bi_off + i])
+        # Bottom annular face (-Z normal)
+        faces.append([bo + i, bo + i_next, bi + i])
+        faces.append([bo + i_next, bi + i_next, bi + i])
 
-        # Inner hole vertical cylinder wall
-        faces.append([ti_off + i, bi_off + i, ti_off + i_next])
-        faces.append([ti_off + i_next, bi_off + i, bi_off + i_next])
+        # Inner hole vertical cylinder wall (inward normal facing void)
+        faces.append([ti + i, bi + i, ti + i_next])
+        faces.append([ti + i_next, bi + i, bi + i_next])
 
-        # Outer filleted vertical wall
-        faces.append([to_off + i, to_off + i_next, bo_off + i])
-        faces.append([to_off + i_next, bo_off + i_next, bo_off + i])
+        # Outer perimeter vertical wall (strictly closed quad loop)
+        faces.append([to + i, to + i_next, bo + i])
+        faces.append([to + i_next, bo + i_next, bo + i])
 
-    # Seal base anchor edge
-    idx_base_l = (num_steps // 2) + (num_steps // 4)
-    idx_base_r = idx_base_l + 1
-
-    p_tl = to_off + idx_base_l
-    p_tr = to_off + idx_base_r
-    p_bl = bo_off + idx_base_l
-    p_br = bo_off + idx_base_r
-
-    faces.append([p_tl, p_tr, p_bl])
-    faces.append([p_tr, p_br, p_bl])
-
-    return all_v, np.array(faces, dtype=np.int32)
+    return vertices, np.array(faces, dtype=np.int32)
 
 
 def build_circular_litho(
     manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15
 ):
     """
-    Constructs a solid monolithic circular lithophane with an integrated
-    Etsy-style swept filleted hanging tab.
+    Constructs a solid monolithic circular lithophane with a guaranteed
+    watertight Etsy-style swept filleted hanging tab.
     """
     radius = manifest.width_mm / 2.0
     b_w = manifest.border_width_mm
@@ -214,6 +188,7 @@ def build_circular_litho(
             faces.append([bp1, bp3, bp2])
             faces.append([bp1, bp4, bp3])
 
+        # Outer rim wall
         rim_top_1 = t * total_rings + (total_rings - 1)
         rim_top_2 = t_next * total_rings + (total_rings - 1)
         rim_bot_1 = rim_top_1 + num_pts
@@ -224,27 +199,27 @@ def build_circular_litho(
     all_f = [np.array(faces, dtype=np.int32)]
     v_total = len(all_v[0])
 
+    # 3. Add Etsy-style tab
     if manifest.hook_count > 0:
         hole_dia = manifest.hook_hole_dia_mm
         inner_r = hole_dia / 2.0
-        wall_thick = 2.0
+        wall_thick = 2.2
         outer_r = inner_r + wall_thick
-        
-        # Position dome so hole sits cleanly above the rim with flared skirt anchored into the border
-        hook_cy = total_radius + inner_r + 1.0
+
+        hook_cy = total_radius + outer_r - 1.0
         hook_cx = 0.0
         anchor_y = total_radius - (b_w * 0.8)
 
-        hv, hf = _create_etsy_hook_mesh(
+        tv, tf = _build_watertight_etsy_tab(
             center_x=hook_cx,
             center_y=hook_cy,
             hole_dia=hole_dia,
             tab_depth=b_d,
             anchor_y=anchor_y,
-            flare_width=4.5,
+            flare_width=4.0,
         )
-        all_v.append(hv)
-        all_f.append(hf + v_total)
+        all_v.append(tv)
+        all_f.append(tf + v_total)
 
     _save_stl(all_v, all_f, output_stl_path)
     return output_stl_path
@@ -253,7 +228,7 @@ def build_circular_litho(
 def build_rectangular_litho(
     manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15
 ):
-    """Builds a solid rectangular lithophane with borders and Etsy-style swept hooks."""
+    """Builds a solid rectangular lithophane with borders and watertight Etsy hooks."""
     core_w = manifest.width_mm
     core_h = manifest.height_mm
     b_w = manifest.border_width_mm
@@ -326,10 +301,10 @@ def build_rectangular_litho(
     if manifest.hook_count > 0:
         hole_dia = manifest.hook_hole_dia_mm
         inner_r = hole_dia / 2.0
-        wall_thick = 2.0
+        wall_thick = 2.2
         outer_r = inner_r + wall_thick
 
-        hook_y = total_h + inner_r + 1.0
+        hook_y = total_h + outer_r - 1.0
         anchor_y = total_h - (b_w * 0.8)
 
         hook_x_positions = []
@@ -340,17 +315,17 @@ def build_rectangular_litho(
             hook_x_positions.append(b_w + (core_w * 0.8))
 
         for hx in hook_x_positions:
-            hv, hf = _create_etsy_hook_mesh(
+            tv, tf = _build_watertight_etsy_tab(
                 center_x=hx,
                 center_y=hook_y,
                 hole_dia=hole_dia,
                 tab_depth=b_d,
                 anchor_y=anchor_y,
-                flare_width=4.5,
+                flare_width=4.0,
             )
-            all_v.append(hv)
-            all_f.append(hf + v_offset)
-            v_offset += len(hv)
+            all_v.append(tv)
+            all_f.append(tf + v_offset)
+            v_offset += len(tv)
 
     _save_stl(all_v, all_f, output_stl_path)
     return output_stl_path
