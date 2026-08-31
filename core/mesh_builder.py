@@ -1,5 +1,5 @@
 import numpy as np
-from stl import mesh
+import trimesh
 from core.manifest_parser import LithoManifest
 from core.heightmap import generate_heightmap
 
@@ -14,17 +14,17 @@ def build_lithophane_stl(
         return build_rectangular_litho(manifest, output_stl_path, resolution_mm)
 
 
-def _create_filleted_hook_tab(
+def _create_hook_tab_mesh(
     center_x: float,
     center_y: float,
     hole_dia: float,
     tab_depth: float,
     anchor_y: float,
     num_steps: int = 36,
-):
+) -> trimesh.Trimesh:
     """
-    Generates a 100% watertight, manifold filleted eyelet solid.
-    All perimeter edges including the base anchor wall are fully closed.
+    Creates an independent, fully manifold watertight Trimesh object
+    for the filleted eyelet tab.
     """
     inner_r = hole_dia / 2.0
     wall_thick = 2.5
@@ -33,30 +33,28 @@ def _create_filleted_hook_tab(
 
     outer_pts = []
 
-    # 1. Upper dome sweep: angle 0 across top (pi/2) to pi
+    # Upper dome sweep: angle 0 to pi
     angles_dome = np.linspace(0, np.pi, num_steps // 2)
     for a in angles_dome:
         outer_pts.append([
             center_x + outer_r * np.cos(a),
-            center_y + outer_r * np.sin(a)
+            center_y + outer_r * np.sin(a),
         ])
 
-    # 2. Left flare extending down to anchor
+    # Flare down to anchor inside the frame rim
     outer_pts.append([center_x - outer_r - (fillet_flare * 0.4), center_y - (outer_r * 0.4)])
     outer_pts.append([center_x - outer_r - fillet_flare, anchor_y])
-
-    # 3. Right flare coming up from anchor
     outer_pts.append([center_x + outer_r + fillet_flare, anchor_y])
     outer_pts.append([center_x + outer_r + (fillet_flare * 0.4), center_y - (outer_r * 0.4)])
 
     outer_contour = np.array(outer_pts, dtype=np.float32)
     num_out = len(outer_contour)
 
-    # Inner circular hole contour (CCW)
+    # Inner circular opening (CCW)
     hole_angles = np.linspace(0, 2 * np.pi, num_out, endpoint=False)
     inner_contour = np.column_stack((
         center_x + inner_r * np.cos(hole_angles),
-        center_y + inner_r * np.sin(hole_angles)
+        center_y + inner_r * np.sin(hole_angles),
     ))
 
     # 3D vertices
@@ -65,7 +63,7 @@ def _create_filleted_hook_tab(
     top_inner = np.column_stack((inner_contour, np.full(num_out, tab_depth)))
     bot_inner = np.column_stack((inner_contour, np.zeros(num_out)))
 
-    all_v = np.vstack((top_outer, top_inner, bot_outer, bot_inner))
+    vertices = np.vstack((top_outer, top_inner, bot_outer, bot_inner))
     faces = []
 
     to_off = 0
@@ -76,11 +74,11 @@ def _create_filleted_hook_tab(
     for i in range(num_out):
         i_next = (i + 1) % num_out
 
-        # Top Annular Face (+Z outward normal)
+        # Top Annular Face (+Z)
         faces.append([to_off + i, ti_off + i, to_off + i_next])
         faces.append([to_off + i_next, ti_off + i, ti_off + i_next])
 
-        # Bottom Annular Face (-Z outward normal)
+        # Bottom Annular Face (-Z)
         faces.append([bo_off + i, bo_off + i_next, bi_off + i])
         faces.append([bo_off + i_next, bi_off + i_next, bi_off + i])
 
@@ -92,13 +90,10 @@ def _create_filleted_hook_tab(
         faces.append([to_off + i, to_off + i_next, bo_off + i])
         faces.append([to_off + i_next, bo_off + i_next, bo_off + i])
 
-    # Indices of base anchor endpoints
-    # Left base anchor point is at index (num_steps // 2) + 1
-    # Right base anchor point is at index (num_steps // 2) + 2
+    # Endcap wall on the base anchor edge
     idx_base_left = (num_steps // 2) + 1
     idx_base_right = (num_steps // 2) + 2
 
-    # Close base anchor wall across bottom edge
     p_tl = to_off + idx_base_left
     p_tr = to_off + idx_base_right
     p_bl = bo_off + idx_base_left
@@ -107,15 +102,16 @@ def _create_filleted_hook_tab(
     faces.append([p_tl, p_tr, p_bl])
     faces.append([p_tr, p_br, p_bl])
 
-    return all_v, np.array(faces, dtype=np.int32)
+    tab_mesh = trimesh.Trimesh(vertices=vertices, faces=np.array(faces, dtype=np.int32), process=True)
+    return tab_mesh
 
 
 def build_circular_litho(
     manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15
 ):
     """
-    Constructs a completely monolithic, continuous solid circular lithophane.
-    The photo relief transitions directly into the outer rim with zero seams or internal walls.
+    Constructs a solid circular lithophane, builds the hook tab,
+    and fuses them with a true CSG boolean union to produce a single-shell STL.
     """
     radius = manifest.width_mm / 2.0
     b_w = manifest.border_width_mm
@@ -125,20 +121,18 @@ def build_circular_litho(
     cols = max(10, int(round(manifest.width_mm / resolution_mm)))
     rows = max(10, int(round(manifest.height_mm / resolution_mm)))
 
-    # Generate heightmap
     hmap, _, _ = generate_heightmap(
         manifest.source_image_path,
         target_width_mm=manifest.width_mm,
         target_height_mm=manifest.height_mm,
         min_thickness_mm=manifest.min_thickness_mm,
         max_thickness_mm=manifest.max_thickness_mm,
-        pixel_size_mm=resolution_mm
+        pixel_size_mm=resolution_mm,
     )
 
-    # Invert rows so row 0 (+Y) corresponds to top of print
+    # Invert rows so row 0 (+Y) matches the top of the 3D print
     hmap = np.flipud(hmap)
 
-    # Monolithic radial sampling: rings sweep from r=0 all the way to total_radius
     num_photo_rings = max(12, int(round(radius / resolution_mm)))
     num_border_rings = max(4, int(round(b_w / resolution_mm)))
     total_rings = num_photo_rings + num_border_rings
@@ -155,20 +149,16 @@ def build_circular_litho(
     x_grid = r_grid * np.cos(theta_grid)
     y_grid = r_grid * np.sin(theta_grid)
 
-    # Compute Z heights continuously across the entire radial domain
     z_grid = np.zeros_like(r_grid)
 
-    # 1. Inner disk: sampled from heightmap
     norm_x = ((x_grid + radius) / (2 * radius) * (cols - 1)).clip(0, cols - 1)
     norm_y = ((y_grid + radius) / (2 * radius) * (rows - 1)).clip(0, rows - 1)
     photo_z = hmap[norm_y.astype(int), norm_x.astype(int)]
 
-    # 2. Outer rim: full border depth
     mask_photo = r_grid < radius
     z_grid[mask_photo] = photo_z[mask_photo]
     z_grid[~mask_photo] = b_d
 
-    # Flatten coordinates
     top_v = np.column_stack((x_grid.ravel(), y_grid.ravel(), z_grid.ravel()))
     bot_v = np.column_stack((x_grid.ravel(), y_grid.ravel(), np.zeros_like(z_grid).ravel()))
     num_pts = top_v.shape[0]
@@ -176,7 +166,6 @@ def build_circular_litho(
     all_v = np.vstack((top_v, bot_v))
     faces = []
 
-    # Triangulate continuous radial ring surface
     for t in range(num_theta):
         t_next = (t + 1) % num_theta
         for r in range(total_rings - 1):
@@ -185,11 +174,9 @@ def build_circular_litho(
             p3 = t_next * total_rings + (r + 1)
             p4 = t_next * total_rings + r
 
-            # Top face (+Z normal)
             faces.append([p1, p2, p3])
             faces.append([p1, p3, p4])
 
-            # Bottom flat face (-Z normal)
             bp1 = p1 + num_pts
             bp2 = p2 + num_pts
             bp3 = p3 + num_pts
@@ -197,7 +184,6 @@ def build_circular_litho(
             faces.append([bp1, bp3, bp2])
             faces.append([bp1, bp4, bp3])
 
-        # Outer rim vertical wall (at outermost ring index)
         rim_top_1 = t * total_rings + (total_rings - 1)
         rim_top_2 = t_next * total_rings + (total_rings - 1)
         rim_bot_1 = rim_top_1 + num_pts
@@ -205,11 +191,8 @@ def build_circular_litho(
         faces.append([rim_top_1, rim_bot_1, rim_top_2])
         faces.append([rim_top_2, rim_bot_1, rim_bot_2])
 
-    v_list = [all_v]
-    f_list = [np.array(faces, dtype=np.int32)]
-    v_total = len(all_v)
+    base_mesh = trimesh.Trimesh(vertices=all_v, faces=np.array(faces, dtype=np.int32), process=True)
 
-    # Integrated hanging eyelet tab
     if manifest.hook_count > 0:
         inner_r = manifest.hook_hole_dia_mm / 2.0
         outer_r = inner_r + 2.5
@@ -217,24 +200,31 @@ def build_circular_litho(
         hook_center_x = 0.0
         anchor_y = total_radius - (b_w * 0.8)
 
-        hv, hf = _create_filleted_hook_tab(
+        tab_mesh = _create_hook_tab_mesh(
             center_x=hook_center_x,
             center_y=hook_center_y,
             hole_dia=manifest.hook_hole_dia_mm,
             tab_depth=b_d,
             anchor_y=anchor_y,
         )
-        v_list.append(hv)
-        f_list.append(hf + v_total)
 
-    _save_stl(v_list, f_list, output_stl_path)
+        try:
+            # CSG boolean union using manifold engine
+            final_mesh = base_mesh.union(tab_mesh, engine="manifold")
+        except Exception:
+            # Fallback to standard union if manifold encounters planar overlaps
+            final_mesh = trimesh.boolean.union([base_mesh, tab_mesh])
+    else:
+        final_mesh = base_mesh
+
+    final_mesh.export(output_stl_path)
     return output_stl_path
 
 
 def build_rectangular_litho(
     manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15
 ):
-    """Builds a solid rectangular lithophane with borders and optional hooks."""
+    """Builds a solid rectangular lithophane with borders and fused hooks."""
     core_w = manifest.width_mm
     core_h = manifest.height_mm
     b_w = manifest.border_width_mm
@@ -246,7 +236,7 @@ def build_rectangular_litho(
         target_height_mm=core_h,
         min_thickness_mm=manifest.min_thickness_mm,
         max_thickness_mm=manifest.max_thickness_mm,
-        pixel_size_mm=resolution_mm
+        pixel_size_mm=resolution_mm,
     )
 
     hmap = np.flipud(hmap)
@@ -283,27 +273,21 @@ def build_rectangular_litho(
     w_t1 = np.column_stack((idx(rows - 1, ce), idx(rows - 1, ce, num_pts), idx(rows - 1, ce + 1)))
     w_t2 = np.column_stack((idx(rows - 1, ce + 1), idx(rows - 1, ce, num_pts), idx(rows - 1, ce + 1, num_pts)))
 
-    faces = np.vstack((t1, t2, b1, b2, w_l1, w_l2, w_r1, w_r2, w_b1, w_b2, w_t1, w_t2))
+    photo_faces = np.vstack((t1, t2, b1, b2, w_l1, w_l2, w_r1, w_r2, w_b1, w_b2, w_t1, w_t2))
+    photo_mesh = trimesh.Trimesh(vertices=all_vertices, faces=photo_faces, process=True)
 
     total_w = core_w + 2 * b_w
     total_h = core_h + 2 * b_w
 
-    boxes = [
-        (0, 0, 0, b_w, total_h, b_d),
-        (total_w - b_w, 0, 0, total_w, total_h, b_d),
-        (b_w, 0, 0, total_w - b_w, b_w, b_d),
-        (b_w, total_h - b_w, 0, total_w - b_w, total_h, b_d),
+    # Outer border rails
+    border_boxes = [
+        trimesh.creation.box(bounds=[[0, 0, 0], [b_w, total_h, b_d]]),
+        trimesh.creation.box(bounds=[[total_w - b_w, 0, 0], [total_w, total_h, b_d]]),
+        trimesh.creation.box(bounds=[[b_w, 0, 0], [total_w - b_w, b_w, b_d]]),
+        trimesh.creation.box(bounds=[[b_w, total_h - b_w, 0], [total_w - b_w, total_h, b_d]]),
     ]
 
-    all_v = [all_vertices]
-    all_f = [faces]
-    v_offset = len(all_vertices)
-
-    for x0, y0, z0, x1, y1, z1 in boxes:
-        bv, bf = _create_box(x0, y0, z0, x1, y1, z1)
-        all_v.append(bv)
-        all_f.append(bf + v_offset)
-        v_offset += len(bv)
+    parts = [photo_mesh] + border_boxes
 
     if manifest.hook_count > 0:
         inner_r = manifest.hook_hole_dia_mm / 2.0
@@ -318,45 +302,20 @@ def build_rectangular_litho(
             hook_x_positions.append(b_w + (core_w * 0.8))
 
         for hx in hook_x_positions:
-            hv, hf = _create_filleted_hook_tab(
-                center_x=hx,
-                center_y=hook_y,
-                hole_dia=manifest.hook_hole_dia_mm,
-                tab_depth=b_d,
-                anchor_y=total_h - 1.5,
+            parts.append(
+                _create_hook_tab_mesh(
+                    center_x=hx,
+                    center_y=hook_y,
+                    hole_dia=manifest.hook_hole_dia_mm,
+                    tab_depth=b_d,
+                    anchor_y=total_h - 1.5,
+                )
             )
-            all_v.append(hv)
-            all_f.append(hf + v_offset)
-            v_offset += len(hv)
 
-    _save_stl(all_v, all_f, output_stl_path)
+    try:
+        final_mesh = trimesh.boolean.union(parts, engine="manifold")
+    except Exception:
+        final_mesh = trimesh.boolean.union(parts)
+
+    final_mesh.export(output_stl_path)
     return output_stl_path
-
-
-def _create_box(x0, y0, z0, x1, y1, z1):
-    v = np.array([
-        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
-    ], dtype=np.float32)
-    f = np.array([
-        [0, 2, 1], [0, 3, 2],
-        [4, 5, 6], [4, 6, 7],
-        [0, 1, 5], [0, 5, 4],
-        [2, 3, 7], [2, 7, 6],
-        [0, 4, 7], [0, 7, 3],
-        [1, 2, 6], [1, 6, 5]
-    ], dtype=np.int32)
-    return v, f
-
-
-def _save_stl(v_list, f_list, output_stl_path):
-    all_vertices = np.vstack(v_list)
-    all_faces = np.vstack(f_list)
-    
-    out_mesh = mesh.Mesh(np.zeros(all_faces.shape[0], dtype=mesh.Mesh.dtype))
-    for i, face in enumerate(all_faces):
-        for j in range(3):
-            out_mesh.vectors[i][j] = all_vertices[face[j], :]
-    
-    out_mesh.update_normals()
-    out_mesh.save(output_stl_path)
