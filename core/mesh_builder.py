@@ -4,7 +4,9 @@ from core.manifest_parser import LithoManifest
 from core.heightmap import generate_heightmap
 
 
-def build_lithophane_stl(manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15):
+def build_lithophane_stl(
+    manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15
+):
     """Router that handles rectangle or circular lithophanes from the web manifest."""
     if manifest.shape == "circle":
         return build_circular_litho(manifest, output_stl_path, resolution_mm)
@@ -12,65 +14,98 @@ def build_lithophane_stl(manifest: LithoManifest, output_stl_path: str, resoluti
         return build_rectangular_litho(manifest, output_stl_path, resolution_mm)
 
 
-def _create_annular_hook_tab(center_x: float, center_y: float, hole_dia: float, tab_depth: float, num_steps: int = 32):
-    """Generates a rounded eyelet tab with a center hole."""
+def _create_filleted_hook_tab(
+    center_x: float,
+    center_y: float,
+    hole_dia: float,
+    tab_depth: float,
+    rim_y_or_r: float,
+    num_steps: int = 36,
+):
+    """
+    Generates an organic, smooth rounded eyelet tab with flared fillet transitions
+    anchoring directly into the frame border.
+    """
     inner_r = hole_dia / 2.0
-    outer_r = inner_r + 2.5  # 2.5mm solid wall around hole
+    wall_thick = 2.5
+    outer_r = inner_r + wall_thick
+    fillet_flare = 3.5  # Width expansion at the base anchoring into the frame
 
-    angles = np.linspace(0, 2 * np.pi, num_steps, endpoint=False)
-    r_vals = np.linspace(inner_r, outer_r, 3)
-    t_r, t_th = np.meshgrid(r_vals, angles)
+    # 1. Outer boundary contour (Upper dome + tangent flaring down to rim)
+    outer_pts = []
 
-    hx = center_x + (t_r * np.cos(t_th))
-    hy = center_y + (t_r * np.sin(t_th))
+    # Upper dome sweep: angle 0 (right) across top (pi/2) to pi (left)
+    angles_dome = np.linspace(0, np.pi, num_steps // 2)
+    for a in angles_dome:
+        outer_pts.append(
+            [center_x + outer_r * np.cos(a), center_y + outer_r * np.sin(a)]
+        )
 
-    top_v = np.column_stack((hx.ravel(), hy.ravel(), np.full(hx.size, tab_depth)))
-    bot_v = np.column_stack((hx.ravel(), hy.ravel(), np.zeros(hx.size)))
-    num_pts = top_v.shape[0]
+    # Left flare down into rim
+    outer_pts.append([
+        center_x - outer_r - (fillet_flare * 0.5),
+        center_y - (outer_r * 0.5),
+    ])
+    outer_pts.append([center_x - outer_r - fillet_flare, rim_y_or_r - 0.5])
 
-    all_v = np.vstack((top_v, bot_v))
+    # Base connection through rim
+    outer_pts.append([center_x + outer_r + fillet_flare, rim_y_or_r - 0.5])
+
+    # Right flare coming up from rim
+    outer_pts.append([
+        center_x + outer_r + (fillet_flare * 0.5),
+        center_y - (outer_r * 0.5),
+    ])
+
+    outer_contour = np.array(outer_pts, dtype=np.float32)
+    num_out = len(outer_contour)
+
+    # 2. Inner hole contour (full 360-degree circle)
+    hole_angles = np.linspace(0, 2 * np.pi, num_out, endpoint=False)
+    inner_contour = np.column_stack((
+        center_x + inner_r * np.cos(hole_angles),
+        center_y + inner_r * np.sin(hole_angles),
+    ))
+
+    # 3. Create 3D vertices: Top face (Z = tab_depth), Bottom face (Z = 0)
+    top_outer = np.column_stack((outer_contour, np.full(num_out, tab_depth)))
+    bot_outer = np.column_stack((outer_contour, np.zeros(num_out)))
+    top_inner = np.column_stack((inner_contour, np.full(num_out, tab_depth)))
+    bot_inner = np.column_stack((inner_contour, np.zeros(num_out)))
+
+    all_v = np.vstack((top_outer, top_inner, bot_outer, bot_inner))
     faces = []
 
-    for i in range(num_steps):
-        i_next = (i + 1) % num_steps
-        for j in range(2):
-            p1 = i * 3 + j
-            p2 = i * 3 + (j + 1)
-            p3 = i_next * 3 + (j + 1)
-            p4 = i_next * 3 + j
+    to_off = 0
+    ti_off = num_out
+    bo_off = 2 * num_out
+    bi_off = 3 * num_out
 
-            # Top faces
-            faces.append([p1, p2, p3])
-            faces.append([p1, p3, p4])
+    for i in range(num_out):
+        i_next = (i + 1) % num_out
 
-            # Bottom faces
-            bp1 = p1 + num_pts
-            bp2 = p2 + num_pts
-            bp3 = p3 + num_pts
-            bp4 = p4 + num_pts
-            faces.append([bp1, bp3, bp2])
-            faces.append([bp1, bp4, bp3])
+        # Top annular face
+        faces.append([to_off + i, ti_off + i, to_off + i_next])
+        faces.append([to_off + i_next, ti_off + i, ti_off + i_next])
 
-        # Inner hole wall
-        in_t1 = i * 3
-        in_t2 = i_next * 3
-        in_b1 = in_t1 + num_pts
-        in_b2 = in_t2 + num_pts
-        faces.append([in_t1, in_t2, in_b1])
-        faces.append([in_t2, in_b2, in_b1])
+        # Bottom annular face (reversed winding for -Z normal)
+        faces.append([bo_off + i, bo_off + i_next, bi_off + i])
+        faces.append([bo_off + i_next, bi_off + i_next, bi_off + i])
 
-        # Outer perimeter wall
-        out_t1 = i * 3 + 2
-        out_t2 = i_next * 3 + 2
-        out_b1 = out_t1 + num_pts
-        out_b2 = out_t2 + num_pts
-        faces.append([out_t1, out_b1, out_t2])
-        faces.append([out_t2, out_b1, out_b2])
+        # Inner hole vertical cylinder wall
+        faces.append([ti_off + i, bi_off + i, ti_off + i_next])
+        faces.append([ti_off + i_next, bi_off + i, bi_off + i_next])
+
+        # Outer filleted vertical perimeter wall
+        faces.append([to_off + i, to_off + i_next, bo_off + i])
+        faces.append([to_off + i_next, bo_off + i_next, bo_off + i])
 
     return all_v, np.array(faces, dtype=np.int32)
 
 
-def build_rectangular_litho(manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15):
+def build_rectangular_litho(
+    manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15
+):
     """Builds a solid rectangular lithophane with borders and optional hooks."""
     core_w = manifest.width_mm
     core_h = manifest.height_mm
@@ -83,7 +118,7 @@ def build_rectangular_litho(manifest: LithoManifest, output_stl_path: str, resol
         target_height_mm=core_h,
         min_thickness_mm=manifest.min_thickness_mm,
         max_thickness_mm=manifest.max_thickness_mm,
-        pixel_size_mm=resolution_mm
+        pixel_size_mm=resolution_mm,
     )
 
     x = np.linspace(b_w, b_w + core_w, cols)
@@ -91,36 +126,78 @@ def build_rectangular_litho(manifest: LithoManifest, output_stl_path: str, resol
     xx, yy = np.meshgrid(x, y)
 
     top_v = np.column_stack((xx.ravel(), yy.ravel(), hmap.ravel()))
-    bot_v = np.column_stack((xx.ravel(), yy.ravel(), np.zeros_like(hmap).ravel()))
+    bot_v = np.column_stack(
+        (xx.ravel(), yy.ravel(), np.zeros_like(hmap).ravel())
+    )
     num_pts = rows * cols
     all_vertices = np.vstack((top_v, bot_v))
 
     def idx(r, c, offset=0):
         return offset + (r * cols + c)
 
-    r_idx, c_idx = np.meshgrid(np.arange(rows - 1), np.arange(cols - 1), indexing='ij')
+    r_idx, c_idx = np.meshgrid(
+        np.arange(rows - 1), np.arange(cols - 1), indexing="ij"
+    )
     rf = r_idx.ravel()
     cf = c_idx.ravel()
 
     # Top & Bottom faces
     t1 = np.column_stack((idx(rf, cf), idx(rf + 1, cf), idx(rf + 1, cf + 1)))
     t2 = np.column_stack((idx(rf, cf), idx(rf + 1, cf + 1), idx(rf, cf + 1)))
-    b1 = np.column_stack((idx(rf, cf, num_pts), idx(rf + 1, cf + 1, num_pts), idx(rf + 1, cf, num_pts)))
-    b2 = np.column_stack((idx(rf, cf, num_pts), idx(rf, cf + 1, num_pts), idx(rf + 1, cf + 1, num_pts)))
+    b1 = np.column_stack(
+        (
+            idx(rf, cf, num_pts),
+            idx(rf + 1, cf + 1, num_pts),
+            idx(rf + 1, cf, num_pts),
+        )
+    )
+    b2 = np.column_stack(
+        (
+            idx(rf, cf, num_pts),
+            idx(rf, cf + 1, num_pts),
+            idx(rf + 1, cf + 1, num_pts),
+        )
+    )
 
     # Wall edges
     re = np.arange(rows - 1)
     ce = np.arange(cols - 1)
     w_l1 = np.column_stack((idx(re, 0), idx(re, 0, num_pts), idx(re + 1, 0)))
-    w_l2 = np.column_stack((idx(re + 1, 0), idx(re, 0, num_pts), idx(re + 1, 0, num_pts)))
-    w_r1 = np.column_stack((idx(re, cols - 1), idx(re + 1, cols - 1), idx(re, cols - 1, num_pts)))
-    w_r2 = np.column_stack((idx(re + 1, cols - 1), idx(re + 1, cols - 1, num_pts), idx(re, cols - 1, num_pts)))
+    w_l2 = np.column_stack(
+        (idx(re + 1, 0), idx(re, 0, num_pts), idx(re + 1, 0, num_pts))
+    )
+    w_r1 = np.column_stack(
+        (idx(re, cols - 1), idx(re + 1, cols - 1), idx(re, cols - 1, num_pts))
+    )
+    w_r2 = np.column_stack(
+        (
+            idx(re + 1, cols - 1),
+            idx(re + 1, cols - 1, num_pts),
+            idx(re, cols - 1, num_pts),
+        )
+    )
     w_b1 = np.column_stack((idx(0, ce), idx(0, ce + 1), idx(0, ce, num_pts)))
-    w_b2 = np.column_stack((idx(0, ce + 1), idx(0, ce + 1, num_pts), idx(0, ce, num_pts)))
-    w_t1 = np.column_stack((idx(rows - 1, ce), idx(rows - 1, ce, num_pts), idx(rows - 1, ce + 1)))
-    w_t2 = np.column_stack((idx(rows - 1, ce + 1), idx(rows - 1, ce, num_pts), idx(rows - 1, ce + 1, num_pts)))
+    w_b2 = np.column_stack(
+        (idx(0, ce + 1), idx(0, ce + 1, num_pts), idx(0, ce, num_pts))
+    )
+    w_t1 = np.column_stack(
+        (
+            idx(rows - 1, ce),
+            idx(rows - 1, ce, num_pts),
+            idx(rows - 1, ce + 1),
+        )
+    )
+    w_t2 = np.column_stack(
+        (
+            idx(rows - 1, ce + 1),
+            idx(rows - 1, ce, num_pts),
+            idx(rows - 1, ce + 1, num_pts),
+        )
+    )
 
-    faces = np.vstack((t1, t2, b1, b2, w_l1, w_l2, w_r1, w_r2, w_b1, w_b2, w_t1, w_t2))
+    faces = np.vstack(
+        (t1, t2, b1, b2, w_l1, w_l2, w_r1, w_r2, w_b1, w_b2, w_t1, w_t2)
+    )
 
     total_w = core_w + 2 * b_w
     total_h = core_h + 2 * b_w
@@ -145,7 +222,7 @@ def build_rectangular_litho(manifest: LithoManifest, output_stl_path: str, resol
     # Hanging hooks for rectangle
     if manifest.hook_count > 0:
         outer_r = (manifest.hook_hole_dia_mm / 2.0) + 2.5
-        hook_y = total_h + outer_r - 1.0  # Fused to top frame edge
+        hook_y = total_h + outer_r - 0.5  # Fused to top frame rail
 
         hook_x_positions = []
         if manifest.hook_count == 1:
@@ -155,7 +232,13 @@ def build_rectangular_litho(manifest: LithoManifest, output_stl_path: str, resol
             hook_x_positions.append(b_w + (core_w * 0.8))
 
         for hx in hook_x_positions:
-            hv, hf = _create_annular_hook_tab(hx, hook_y, manifest.hook_hole_dia_mm, b_d)
+            hv, hf = _create_filleted_hook_tab(
+                center_x=hx,
+                center_y=hook_y,
+                hole_dia=manifest.hook_hole_dia_mm,
+                tab_depth=b_d,
+                rim_y_or_r=total_h,
+            )
             all_v.append(hv)
             all_f.append(hf + v_offset)
             v_offset += len(hv)
@@ -164,7 +247,9 @@ def build_rectangular_litho(manifest: LithoManifest, output_stl_path: str, resol
     return output_stl_path
 
 
-def build_circular_litho(manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15):
+def build_circular_litho(
+    manifest: LithoManifest, output_stl_path: str, resolution_mm: float = 0.15
+):
     """Builds a solid circular lithophane with a raised outer ring border and integrated hook tab."""
     radius = manifest.width_mm / 2.0
     b_w = manifest.border_width_mm
@@ -180,7 +265,7 @@ def build_circular_litho(manifest: LithoManifest, output_stl_path: str, resoluti
         target_height_mm=manifest.height_mm,
         min_thickness_mm=manifest.min_thickness_mm,
         max_thickness_mm=manifest.max_thickness_mm,
-        pixel_size_mm=resolution_mm
+        pixel_size_mm=resolution_mm,
     )
 
     num_rings = int(radius / resolution_mm)
@@ -198,7 +283,9 @@ def build_circular_litho(manifest: LithoManifest, output_stl_path: str, resoluti
     z_grid = hmap[norm_y.astype(int), norm_x.astype(int)]
 
     top_v = np.column_stack((x_grid.ravel(), y_grid.ravel(), z_grid.ravel()))
-    bot_v = np.column_stack((x_grid.ravel(), y_grid.ravel(), np.zeros_like(z_grid).ravel()))
+    bot_v = np.column_stack(
+        (x_grid.ravel(), y_grid.ravel(), np.zeros_like(z_grid).ravel())
+    )
     num_pts = top_v.shape[0]
 
     all_v = np.vstack((top_v, bot_v))
@@ -222,7 +309,7 @@ def build_circular_litho(manifest: LithoManifest, output_stl_path: str, resoluti
             faces.append([bp1, bp3, bp2])
             faces.append([bp1, bp4, bp3])
 
-    # Outer ring
+    # Outer rim border
     border_r_vals = np.linspace(radius, total_radius, 4)
     br_grid, btheta_grid = np.meshgrid(border_r_vals, theta_vals)
     bx_grid = br_grid * np.cos(btheta_grid)
@@ -230,8 +317,12 @@ def build_circular_litho(manifest: LithoManifest, output_stl_path: str, resoluti
     bz_top = np.full_like(bx_grid, b_d)
     bz_bot = np.zeros_like(bx_grid)
 
-    ring_top_v = np.column_stack((bx_grid.ravel(), by_grid.ravel(), bz_top.ravel()))
-    ring_bot_v = np.column_stack((bx_grid.ravel(), by_grid.ravel(), bz_bot.ravel()))
+    ring_top_v = np.column_stack(
+        (bx_grid.ravel(), by_grid.ravel(), bz_top.ravel())
+    )
+    ring_bot_v = np.column_stack(
+        (bx_grid.ravel(), by_grid.ravel(), bz_bot.ravel())
+    )
     ring_num_pts = ring_top_v.shape[0]
 
     border_offset = len(all_v)
@@ -266,13 +357,19 @@ def build_circular_litho(manifest: LithoManifest, output_stl_path: str, resoluti
     f_list = [np.array(faces, dtype=np.int32)]
     v_total = len(all_v)
 
-    # Integrated hanging hook for circular frame
+    # Integrated filleted hook for circular frame
     if manifest.hook_count > 0:
         outer_r = (manifest.hook_hole_dia_mm / 2.0) + 2.5
-        hook_center_y = total_radius + outer_r - 1.0
+        hook_center_y = total_radius + outer_r - 0.5
         hook_center_x = 0.0
 
-        hv, hf = _create_annular_hook_tab(hook_center_x, hook_center_y, manifest.hook_hole_dia_mm, b_d)
+        hv, hf = _create_filleted_hook_tab(
+            center_x=hook_center_x,
+            center_y=hook_center_y,
+            hole_dia=manifest.hook_hole_dia_mm,
+            tab_depth=b_d,
+            rim_y_or_r=total_radius,
+        )
         v_list.append(hv)
         f_list.append(hf + v_total)
 
@@ -281,15 +378,36 @@ def build_circular_litho(manifest: LithoManifest, output_stl_path: str, resoluti
 
 
 def _create_box(x0, y0, z0, x1, y1, z1):
-    v = np.array([
-        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]
-    ], dtype=np.float32)
-    f = np.array([
-        [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
-        [0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6],
-        [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5]
-    ], dtype=np.int32)
+    v = np.array(
+        [
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1],
+        ],
+        dtype=np.float32,
+    )
+    f = np.array(
+        [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 1, 5],
+            [0, 5, 4],
+            [2, 3, 7],
+            [2, 7, 6],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ],
+        dtype=np.int32,
+    )
     return v, f
 
 
