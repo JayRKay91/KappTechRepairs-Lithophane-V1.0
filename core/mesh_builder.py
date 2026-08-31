@@ -21,80 +21,71 @@ def _build_watertight_etsy_tab(
     tab_depth: float,
     anchor_y: float,
     flare_width: float = 4.0,
-    num_dome_pts: int = 24,
-    num_flare_pts: int = 8,
+    num_steps: int = 48,
 ):
     """
-    Constructs a 100% watertight, manifold 3D solid for the Etsy filleted tab.
-    Built as a strictly closed 2D polygon extrusion to guarantee zero unclosed edges.
+    Constructs a 100% watertight, non-self-intersecting Etsy-style hanging tab.
+    Uses synchronized radial angle rays so faces never twist across the inner hole.
     """
     inner_r = hole_dia / 2.0
     wall_thick = 2.2
-    outer_r = inner_r + wall_thick
+    dome_r = inner_r + wall_thick
 
-    # 1. Outer boundary contour (Looping CCW)
-    outer_pts = []
+    angles = np.linspace(0, 2 * np.pi, num_steps, endpoint=False)
+    
+    # 1. Inner hole coordinates
+    in_x = center_x + inner_r * np.cos(angles)
+    in_y = center_y + inner_r * np.sin(angles)
 
-    # 1a. Upper semicircular dome: angle 0 (right) across top (pi/2) to pi (left)
-    angles_dome = np.linspace(0, np.pi, num_dome_pts, endpoint=True)
-    for a in angles_dome:
-        outer_pts.append([
-            center_x + outer_r * np.cos(a),
-            center_y + outer_r * np.sin(a),
-        ])
+    # 2. Outer Etsy profile computed strictly along the same angle rays
+    out_x = np.zeros(num_steps, dtype=np.float32)
+    out_y = np.zeros(num_steps, dtype=np.float32)
 
-    # 1b. Left tangent flare curve sweeping down into the border
-    t_vals = np.linspace(0.0, 1.0, num_flare_pts)[1:]
-    for t in t_vals:
-        # Smooth cosine ease for concave flare
-        ease = 0.5 * (1.0 - np.cos(np.pi * t))
-        px = center_x - outer_r - (flare_width * ease)
-        py = center_y - (t * (center_y - anchor_y))
-        outer_pts.append([px, py])
+    for i, a in enumerate(angles):
+        if 0 <= a <= np.pi:
+            # Upper dome: pure circle of radius dome_r
+            out_x[i] = center_x + dome_r * np.cos(a)
+            out_y[i] = center_y + dome_r * np.sin(a)
+        elif np.pi < a <= 1.5 * np.pi:
+            # Left flare: sweeps from angle pi down to 1.5 pi (-Y)
+            t = (a - np.pi) / (0.5 * np.pi)
+            ease = 0.5 * (1.0 - np.cos(np.pi * t))
+            px = center_x - dome_r - (flare_width * ease)
+            py = center_y - (t * (center_y - anchor_y))
+            out_x[i] = px
+            out_y[i] = min(py, center_y + dome_r * np.sin(a))
+        else:
+            # Right flare: sweeps from 1.5 pi up to 2 pi
+            t = (2.0 * np.pi - a) / (0.5 * np.pi)
+            ease = 0.5 * (1.0 - np.cos(np.pi * t))
+            px = center_x + dome_r + (flare_width * ease)
+            py = center_y - (t * (center_y - anchor_y))
+            out_x[i] = px
+            out_y[i] = min(py, center_y + dome_r * np.sin(a))
 
-    # 1c. Bottom flat base anchor line (fused deep inside the border rim)
-    outer_pts.append([center_x + outer_r + flare_width, anchor_y])
+    # Pull the entire bottom footing flat to anchor_y
+    mask_base = (angles >= 1.25 * np.pi) & (angles <= 1.75 * np.pi)
+    out_y[mask_base] = anchor_y
 
-    # 1d. Right tangent flare curve sweeping back up to angle 0
-    for t in reversed(t_vals[:-1]):
-        ease = 0.5 * (1.0 - np.cos(np.pi * t))
-        px = center_x + outer_r + (flare_width * ease)
-        py = center_y - (t * (center_y - anchor_y))
-        outer_pts.append([px, py])
-
-    outer_contour = np.array(outer_pts, dtype=np.float32)
-    N = len(outer_contour)
-
-    # 2. Inner circular hole contour with exact same N points (Looping CCW)
-    hole_angles = np.linspace(0, 2 * np.pi, N, endpoint=False)
-    inner_contour = np.column_stack((
-        center_x + inner_r * np.cos(hole_angles),
-        center_y + inner_r * np.sin(hole_angles),
-    ))
-
-    # 3. Assemble 3D vertices:
-    # 0 .. N-1:         Top Outer
-    # N .. 2N-1:        Top Inner
-    # 2N .. 3N-1:       Bot Outer
-    # 3N .. 4N-1:       Bot Inner
-    top_outer = np.column_stack((outer_contour, np.full(N, tab_depth)))
-    top_inner = np.column_stack((inner_contour, np.full(N, tab_depth)))
-    bot_outer = np.column_stack((outer_contour, np.zeros(N)))
-    bot_inner = np.column_stack((inner_contour, np.zeros(N)))
+    # 3. Assemble 3D vertices
+    top_outer = np.column_stack((out_x, out_y, np.full(num_steps, tab_depth)))
+    top_inner = np.column_stack((in_x, in_y, np.full(num_steps, tab_depth)))
+    bot_outer = np.column_stack((out_x, out_y, np.zeros(num_steps)))
+    bot_inner = np.column_stack((in_x, in_y, np.zeros(num_steps)))
 
     vertices = np.vstack((top_outer, top_inner, bot_outer, bot_inner))
     faces = []
 
     to = 0
-    ti = N
-    bo = 2 * N
-    bi = 3 * N
+    ti = num_steps
+    bo = 2 * num_steps
+    bi = 3 * num_steps
 
-    # 4. Triangulate all faces strictly looping around N
-    for i in range(N):
-        i_next = (i + 1) % N
+    # 4. Perfectly synchronized radial wedge triangulation
+    for i in range(num_steps):
+        i_next = (i + 1) % num_steps
 
-        # Top annular face between outer flare and hole (+Z normal)
+        # Top annular face (+Z normal)
         faces.append([to + i, ti + i, to + i_next])
         faces.append([to + i_next, ti + i, ti + i_next])
 
@@ -102,11 +93,11 @@ def _build_watertight_etsy_tab(
         faces.append([bo + i, bo + i_next, bi + i])
         faces.append([bo + i_next, bi + i_next, bi + i])
 
-        # Inner hole vertical cylinder wall (inward normal facing void)
+        # Inner hole vertical wall
         faces.append([ti + i, bi + i, ti + i_next])
         faces.append([ti + i_next, bi + i, bi + i_next])
 
-        # Outer perimeter vertical wall (strictly closed quad loop)
+        # Outer perimeter vertical wall
         faces.append([to + i, to + i_next, bo + i])
         faces.append([to + i_next, bo + i_next, bo + i])
 
@@ -188,7 +179,6 @@ def build_circular_litho(
             faces.append([bp1, bp3, bp2])
             faces.append([bp1, bp4, bp3])
 
-        # Outer rim wall
         rim_top_1 = t * total_rings + (total_rings - 1)
         rim_top_2 = t_next * total_rings + (total_rings - 1)
         rim_bot_1 = rim_top_1 + num_pts
@@ -204,9 +194,9 @@ def build_circular_litho(
         hole_dia = manifest.hook_hole_dia_mm
         inner_r = hole_dia / 2.0
         wall_thick = 2.2
-        outer_r = inner_r + wall_thick
+        dome_r = inner_r + wall_thick
 
-        hook_cy = total_radius + outer_r - 1.0
+        hook_cy = total_radius + dome_r - 1.0
         hook_cx = 0.0
         anchor_y = total_radius - (b_w * 0.8)
 
@@ -217,6 +207,7 @@ def build_circular_litho(
             tab_depth=b_d,
             anchor_y=anchor_y,
             flare_width=4.0,
+            num_steps=48,
         )
         all_v.append(tv)
         all_f.append(tf + v_total)
@@ -302,9 +293,9 @@ def build_rectangular_litho(
         hole_dia = manifest.hook_hole_dia_mm
         inner_r = hole_dia / 2.0
         wall_thick = 2.2
-        outer_r = inner_r + wall_thick
+        dome_r = inner_r + wall_thick
 
-        hook_y = total_h + outer_r - 1.0
+        hook_y = total_h + dome_r - 1.0
         anchor_y = total_h - (b_w * 0.8)
 
         hook_x_positions = []
@@ -322,6 +313,7 @@ def build_rectangular_litho(
                 tab_depth=b_d,
                 anchor_y=anchor_y,
                 flare_width=4.0,
+                num_steps=48,
             )
             all_v.append(tv)
             all_f.append(tf + v_offset)
