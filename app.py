@@ -1,3 +1,5 @@
+# === Litho Mesh Studio - Version 1.0 Final Release ===
+
 import os
 import threading
 import subprocess

@@ -1,3 +1,5 @@
+# === Litho Mesh Studio - Version 1.0 Final Release ===
+
 import json
 import os
 from dataclasses import dataclass

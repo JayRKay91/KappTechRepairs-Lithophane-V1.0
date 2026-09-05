@@ -1,3 +1,5 @@
+# === Litho Mesh Studio - Version 1.0 Final Release ===
+
 import numpy as np
 from stl import mesh
 from core.manifest_parser import LithoManifest
